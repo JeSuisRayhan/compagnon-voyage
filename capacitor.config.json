@@ -1,0 +1,22 @@
+{
+  "appId": "com.compagnondevoyage.app",
+  "appName": "Compagnon de voyage",
+  "webDir": "www",
+  "backgroundColor": "#170F1F",
+  "android": {
+    "backgroundColor": "#170F1F"
+  },
+  "ios": {
+    "backgroundColor": "#170F1F",
+    "contentInset": "always"
+  },
+  "plugins": {
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_icon",
+      "iconColor": "#F4B740"
+    },
+    "SplashScreen": {
+      "launchShowDuration": 0
+    }
+  }
+}
