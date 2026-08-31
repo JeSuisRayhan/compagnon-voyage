@@ -17,28 +17,15 @@
 <body>
 <div id="root"></div>
 <pre id="boot-error"></pre>
-
 <script>
   window.storage = {
-    async get(key) {
-      const v = localStorage.getItem(key);
-      if (v === null) return null;
-      return { key, value: v };
-    },
-    async set(key, value) {
-      localStorage.setItem(key, value);
-      return { key, value };
-    },
-    async delete(key) {
-      localStorage.removeItem(key);
-      return { key, deleted: true };
-    },
+    async get(key) { const v = localStorage.getItem(key); if (v === null) return null; return { key, value: v }; },
+    async set(key, value) { localStorage.setItem(key, value); return { key, value }; },
+    async delete(key) { localStorage.removeItem(key); return { key, deleted: true }; },
   };
 </script>
-
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-
 <script>
 (function () {
   try {
@@ -1444,83 +1431,15 @@ Jour 1 - 2026-03-12 - Rome
 20:00 Restaurant [repas]
 
 Réponds UNIQUEMENT avec le texte reformaté, dans le même style que "Sortie" ci-dessus — aucun mot avant, aucun mot après, jamais de question ni de refus. L'exemple sert uniquement à montrer le style attendu : applique ce format au texte réellement donné par l'utilisateur, pas à l'exemple lui-même.`;
-const LOCAL_MODEL_ID = "Llama-3.2-1B-Instruct-q4f16_1-MLC";
-let __localEngine = null;
-let __localEngineLoading = null;
-function localAISupported() {
-  return typeof navigator !== "undefined" && "gpu" in navigator;
-}
-async function getLocalEngine(onProgress) {
-  if (__localEngine) return __localEngine;
-  if (__localEngineLoading) return __localEngineLoading;
-  __localEngineLoading = (async () => {
-    const webllm = await import("https://esm.run/@mlc-ai/web-llm");
-    const engine = await webllm.CreateMLCEngine(LOCAL_MODEL_ID, {
-      initProgressCallback: report => {
-        if (onProgress) {
-          const pct = report && report.progress != null ? Math.round(report.progress * 100) + "% — " : "";
-          onProgress(pct + (report && report.text || "Chargement du modèle…"));
-        }
-      }
-    });
-    __localEngine = engine;
-    __localEngineLoading = null;
-    return engine;
-  })();
-  return __localEngineLoading;
-}
-async function preloadLocalEngine(onProgress) {
-  if (!localAISupported()) {
-    const err = new Error("NO_WEBGPU");
-    err.code = "NO_WEBGPU";
-    throw err;
-  }
-  await getLocalEngine(onProgress);
-}
-let __localInferenceLock = Promise.resolve();
-async function normalizeWithLocalEngine(raw, onProgress) {
-  const previous = __localInferenceLock.catch(() => {});
-  let release;
-  __localInferenceLock = new Promise(resolve => {
-    release = resolve;
-  });
-  try {
-    await previous;
-    const engine = await getLocalEngine(onProgress);
-    if (onProgress) onProgress("Génération en cours…");
-    const reply = await engine.chat.completions.create({
-      messages: [{
-        role: "system",
-        content: SCRIPT_FORMAT_SYSTEM
-      }, {
-        role: "user",
-        content: raw
-      }],
-      temperature: 0.2
-    });
-    const text = reply && reply.choices && reply.choices[0] && reply.choices[0].message && reply.choices[0].message.content ? reply.choices[0].message.content.trim() : "";
-    if (!text) throw new Error("Réponse vide");
-    return text;
-  } catch (e) {
-    __localEngine = null;
-    __localEngineLoading = null;
-    throw e;
-  } finally {
-    release();
-  }
-}
-async function normalizeWithApiKey(raw, apiKey) {
+async function normalizeScriptWithAI(raw) {
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true"
+      "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      model: "claude-sonnet-5",
-      max_tokens: 1500,
+      model: "claude-sonnet-4-6",
+      max_tokens: 1000,
       system: SCRIPT_FORMAT_SYSTEM,
       messages: [{
         role: "user",
@@ -1535,106 +1454,6 @@ async function normalizeWithApiKey(raw, apiKey) {
   const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n").trim();
   if (!text) throw new Error("Réponse vide");
   return text;
-}
-const WASM_MODEL_ID = "Xenova/Qwen1.5-0.5B-Chat";
-let __wasmPipeline = null;
-let __wasmPipelineLoading = null;
-function wasmAISupported() {
-  return typeof WebAssembly !== "undefined";
-}
-async function getWasmPipeline(onProgress) {
-  if (__wasmPipeline) return __wasmPipeline;
-  if (__wasmPipelineLoading) return __wasmPipelineLoading;
-  __wasmPipelineLoading = (async () => {
-    const {
-      pipeline
-    } = await import("https://esm.run/@xenova/transformers");
-    const generator = await pipeline("text-generation", WASM_MODEL_ID, {
-      progress_callback: data => {
-        if (!onProgress || !data) return;
-        if (data.status === "progress" && data.progress != null) {
-          onProgress(Math.round(data.progress) + "% — Téléchargement du modèle léger…");
-        } else if (data.status === "ready" || data.status === "done") {
-          onProgress("Modèle prêt…");
-        } else {
-          onProgress("Préparation du modèle…");
-        }
-      }
-    });
-    __wasmPipeline = generator;
-    __wasmPipelineLoading = null;
-    return generator;
-  })();
-  return __wasmPipelineLoading;
-}
-async function preloadWasmEngine(onProgress) {
-  await getWasmPipeline(onProgress);
-}
-async function normalizeWithWasmEngine(raw, onProgress) {
-  const generator = await getWasmPipeline(onProgress);
-  if (onProgress) onProgress("Génération en cours (peut prendre 1 à 2 minutes)…");
-  const messages = [{
-    role: "system",
-    content: SCRIPT_FORMAT_SYSTEM
-  }, {
-    role: "user",
-    content: raw
-  }];
-  const output = await generator(messages, {
-    max_new_tokens: 550,
-    temperature: 0.2,
-    do_sample: false
-  });
-  let text = "";
-  try {
-    const first = Array.isArray(output) ? output[0] : output;
-    const gen = first && first.generated_text;
-    if (Array.isArray(gen)) {
-      const last = gen[gen.length - 1];
-      text = last && last.content ? last.content : "";
-    } else if (typeof gen === "string") {
-      text = gen;
-    }
-  } catch (e) {
-    text = "";
-  }
-  text = (text || "").trim();
-  if (!text) throw new Error("Réponse vide");
-  return text;
-}
-async function normalizeScriptWithAI(raw, onProgress) {
-  const apiKey = typeof localStorage !== "undefined" ? localStorage.getItem("anthropicApiKey") : null;
-  if (apiKey) {
-    if (onProgress) onProgress("Génération via l'API…");
-    try {
-      return await normalizeWithApiKey(raw, apiKey);
-    } catch (e) {
-      if (onProgress) onProgress("Clé API indisponible, tentative en local…");
-    }
-  }
-  if (localAISupported()) {
-    try {
-      return await normalizeWithLocalEngine(raw, onProgress);
-    } catch (e) {
-      if (onProgress) onProgress("Mode rapide indisponible…");
-    }
-  }
-  if (wasmAISupported()) {
-    const proceed = typeof window !== "undefined" && window.confirm ? window.confirm("Le mode compatible tourne entièrement sur le processeur de votre téléphone : ça peut le ralentir fortement et prendre 1 à 2 minutes. Continuer ?\n\n(Astuce : ajoutez une clé API dans Réglages pour une correction quasi instantanée sans solliciter votre téléphone.)") : true;
-    if (!proceed) {
-      const err = new Error("CANCELLED");
-      err.code = "CANCELLED";
-      throw err;
-    }
-    try {
-      return await normalizeWithWasmEngine(raw, onProgress);
-    } catch (e) {
-      // fall through to NO_METHOD
-    }
-  }
-  const err = new Error("NO_METHOD");
-  err.code = "NO_METHOD";
-  throw err;
 }
 
 // ---------- ICS export ----------
@@ -1953,7 +1772,9 @@ function VoiceInputButton({
 }) {
   const recognitionRef = useRef(null);
   const [listening, setListening] = useState(false);
-  const supported = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
+  const [error, setError] = useState("");
+  const isCapacitor = typeof window !== "undefined" && window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.SpeechRecognition;
+  const webSupported = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
   useEffect(() => {
     return () => {
       if (recognitionRef.current) {
@@ -1965,12 +1786,52 @@ function VoiceInputButton({
       }
     };
   }, []);
-  if (!supported) return null;
-  function toggle() {
+  if (!isCapacitor && !webSupported) return null;
+  async function toggleCapacitor() {
+    const SR = window.Capacitor.Plugins.SpeechRecognition;
+    if (listening) {
+      try {
+        await SR.stop();
+      } catch (e) {
+        // ignore
+      }
+      setListening(false);
+      return;
+    }
+    setError("");
+    try {
+      const avail = await SR.available();
+      if (!avail || !avail.available) {
+        setError("Reconnaissance vocale indisponible sur cet appareil.");
+        return;
+      }
+      const perm = await SR.requestPermissions();
+      const granted = perm && (perm.speechRecognition === "granted" || perm.microphone === "granted") || perm === "granted";
+      if (!granted) {
+        setError("Autorisation micro refusée. Activez-la dans les réglages de l'app.");
+        return;
+      }
+      setListening(true);
+      const result = await SR.start({
+        language: "fr-FR",
+        maxResults: 1,
+        partialResults: false,
+        popup: false
+      });
+      setListening(false);
+      const text = result && result.matches && result.matches[0];
+      if (text && text.trim()) onResult(text.trim());
+    } catch (e) {
+      setListening(false);
+      setError("La dictée a échoué. Réessayez.");
+    }
+  }
+  function toggleWeb() {
     if (listening) {
       recognitionRef.current && recognitionRef.current.stop();
       return;
     }
+    setError("");
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     const recognition = new SR();
     recognition.lang = "fr-FR";
@@ -1984,7 +1845,10 @@ function VoiceInputButton({
       if (text.trim()) onResult(text.trim());
     };
     recognition.onend = () => setListening(false);
-    recognition.onerror = () => setListening(false);
+    recognition.onerror = () => {
+      setListening(false);
+      setError("La dictée a échoué. Réessayez.");
+    };
     recognitionRef.current = recognition;
     try {
       recognition.start();
@@ -1993,7 +1857,14 @@ function VoiceInputButton({
       setListening(false);
     }
   }
-  return /*#__PURE__*/React.createElement("button", {
+  const toggle = isCapacitor ? toggleCapacitor : toggleWeb;
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("button", {
     type: "button",
     onClick: toggle,
     title: listening ? "Arrêter la dictée" : "Dicter le programme",
@@ -2013,7 +1884,12 @@ function VoiceInputButton({
     }
   }, /*#__PURE__*/React.createElement(Mic, {
     size: 15
-  }));
+  })), error && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 10.5,
+      color: THEME.stamp
+    }
+  }, error));
 }
 function WizardChecklistEditor({
   items,
@@ -2180,33 +2056,21 @@ Jour 2 - Tokyo
       phrases: []
     });
   }
-  const fixCancelledRef = useRef(false);
   async function fixWithAI() {
     if (!script.trim() || fixing) return;
-    fixCancelledRef.current = false;
     setFixing(true);
     setFixError("");
     setLoadStatus("");
     try {
       const cleaned = await normalizeScriptWithAI(script, s => setLoadStatus(s));
-      if (fixCancelledRef.current) return;
       setScript(cleaned);
       setFixed(true);
     } catch (e) {
-      if (fixCancelledRef.current) return;
-      setFixError(e && e.code === "CANCELLED" ? "Correction annulée." : e && e.code === "NO_METHOD" ? "Pas d'IA disponible sur cet appareil. Ajoutez une clé API Anthropic dans Réglages pour activer la correction." : "La correction a échoué (" + (e && e.message ? e.message : "erreur inconnue") + "). Réessayez, ou modifiez le texte à la main.");
+      setFixError("La correction a échoué. Réessayez, ou modifiez le texte à la main.");
     } finally {
-      if (!fixCancelledRef.current) {
-        setFixing(false);
-        setLoadStatus("");
-      }
+      setFixing(false);
+      setLoadStatus("");
     }
-  }
-  function cancelFixWithAI() {
-    fixCancelledRef.current = true;
-    setFixing(false);
-    setLoadStatus("");
-    setFixError("Correction annulée.");
   }
   function goBack() {
     if (step === 1) {
@@ -2502,24 +2366,16 @@ Jour 2 - Tokyo
       lineHeight: 1.5,
       marginBottom: 10
     }
-  }, "Format : une ligne \"Jour N - [date] - [titre]\" pour démarrer une journée, puis des lignes \"HH:MM activité [type]\". Types reconnus entre crochets : hôtel, transport, repas — sinon activité par défaut. Vous pourrez tout modifier ensuite."), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 8
-    }
-  }, /*#__PURE__*/React.createElement(Button, {
+  }, "Format : une ligne \"Jour N - [date] - [titre]\" pour démarrer une journée, puis des lignes \"HH:MM activité [type]\". Types reconnus entre crochets : hôtel, transport, repas — sinon activité par défaut. Vous pourrez tout modifier ensuite."), /*#__PURE__*/React.createElement(Button, {
     variant: "teal",
     onClick: fixWithAI,
     disabled: !script.trim() || fixing,
     style: {
-      flex: 1
+      width: "100%"
     }
   }, /*#__PURE__*/React.createElement(Sparkles, {
     size: 14
-  }), " ", fixing ? loadStatus || "Correction en cours…" : "Script mal formaté ? Corriger avec l'IA"), fixing && /*#__PURE__*/React.createElement(Button, {
-    variant: "ghost",
-    onClick: cancelFixWithAI
-  }, "Annuler")), fixed && !fixError && /*#__PURE__*/React.createElement("div", {
+  }), " ", fixing ? loadStatus || "Correction en cours…" : "Script mal formaté ? Corriger avec l'IA"), fixed && !fixError && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
       color: THEME.teal,
@@ -3465,12 +3321,37 @@ function DayDetail({
     dateISO: date
   })), day.activities.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
-      fontSize: 11.5,
-      color: THEME.teal,
       marginLeft: 30,
-      marginTop: 2
+      marginTop: 6,
+      maxWidth: 260
     }
-  }, day.activities.filter(a => a.done).length, "/", day.activities.length, " étape", day.activities.length !== 1 ? "s" : "", " faite", day.activities.filter(a => a.done).length !== 1 ? "s" : ""), dayTotal > 0 && /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      marginBottom: 4
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11.5,
+      color: THEME.teal
+    }
+  }, day.activities.filter(a => a.done).length, "/", day.activities.length, " étape", day.activities.length !== 1 ? "s" : "", " faite", day.activities.filter(a => a.done).length !== 1 ? "s" : "")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 6,
+      borderRadius: 4,
+      background: THEME.bgCardAlt,
+      overflow: "hidden"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: "100%",
+      width: `${day.activities.filter(a => a.done).length / day.activities.length * 100}%`,
+      background: THEME.teal,
+      borderRadius: 4,
+      transition: "width 0.3s ease"
+    }
+  }))), dayTotal > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
       color: THEME.gold,
@@ -3630,228 +3511,6 @@ function DayDetail({
 
 // ---------- Settings ----------
 
-function LocalAICard() {
-  const [status, setStatus] = useState("idle");
-  const [progressText, setProgressText] = useState("");
-  const [error, setError] = useState("");
-  const supported = localAISupported();
-  async function preload() {
-    if (!supported || status === "loading" || status === "ready") return;
-    setStatus("loading");
-    setError("");
-    try {
-      await preloadLocalEngine(t => setProgressText(t));
-      setStatus("ready");
-    } catch (e) {
-      setStatus("error");
-      setError(e && e.message ? e.message : "Échec du chargement.");
-    }
-  }
-  return /*#__PURE__*/React.createElement("div", {
-    style: {
-      background: THEME.bgCard,
-      border: `1px solid ${THEME.border}`,
-      borderRadius: 12,
-      padding: 16,
-      marginBottom: 14
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      alignItems: "center",
-      gap: 10,
-      marginBottom: 8
-    }
-  }, /*#__PURE__*/React.createElement(Sparkles, {
-    size: 18,
-    color: THEME.gold
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 14,
-      fontWeight: 500,
-      color: THEME.ink
-    }
-  }, "Modèle IA local (rapide)")), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12.5,
-      color: THEME.inkMuted,
-      lineHeight: 1.5,
-      marginBottom: 10
-    }
-  }, "N'est utilisé que si aucune clé API n'est enregistrée ci-dessous. Entièrement sur votre téléphone, aucune donnée envoyée. Premier usage : téléchargement unique d'environ 800 Mo (Wi-Fi conseillé). Nécessite WebGPU (Chrome récent sur Android capable) — pas disponible sur tous les téléphones ni sur Firefox Android."), !supported && /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12,
-      color: THEME.stamp,
-      marginBottom: 8
-    }
-  }, "WebGPU non détecté sur cet appareil — le mode compatible (plus lent) prendra le relais, avec confirmation."), status === "ready" && /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12,
-      color: THEME.teal,
-      marginBottom: 8
-    }
-  }, "Modèle prêt et en cache."), status === "loading" && /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12,
-      color: THEME.inkMuted,
-      marginBottom: 8
-    }
-  }, progressText || "Chargement…"), status === "error" && /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12,
-      color: THEME.stamp,
-      marginBottom: 8
-    }
-  }, error), /*#__PURE__*/React.createElement(Button, {
-    variant: "teal",
-    onClick: preload,
-    disabled: !supported || status === "loading" || status === "ready"
-  }, status === "ready" ? "Modèle prêt" : status === "loading" ? "Téléchargement…" : "Précharger le modèle"));
-}
-function WasmAICard() {
-  const [status, setStatus] = useState("idle");
-  const [progressText, setProgressText] = useState("");
-  const [error, setError] = useState("");
-  async function preload() {
-    if (status === "loading" || status === "ready") return;
-    setStatus("loading");
-    setError("");
-    try {
-      await preloadWasmEngine(t => setProgressText(t));
-      setStatus("ready");
-    } catch (e) {
-      setStatus("error");
-      setError(e && e.message ? e.message : "Échec du chargement.");
-    }
-  }
-  return /*#__PURE__*/React.createElement("div", {
-    style: {
-      background: THEME.bgCard,
-      border: `1px solid ${THEME.border}`,
-      borderRadius: 12,
-      padding: 16,
-      marginBottom: 14
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      alignItems: "center",
-      gap: 10,
-      marginBottom: 8
-    }
-  }, /*#__PURE__*/React.createElement(Sparkles, {
-    size: 18,
-    color: THEME.blue
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 14,
-      fontWeight: 500,
-      color: THEME.ink
-    }
-  }, "Modèle IA local (compatible — lent)")), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12.5,
-      color: THEME.inkMuted,
-      lineHeight: 1.5,
-      marginBottom: 10
-    }
-  }, "Dernier recours si ni clé API ni mode rapide ne fonctionnent. Tourne sur le processeur — sollicite fortement votre téléphone et peut prendre 1 à 2 minutes. Une confirmation vous est toujours demandée avant de le lancer. Si votre téléphone rame avec ce mode, ajoutez plutôt une clé API ci-dessous."), status === "ready" && /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12,
-      color: THEME.teal,
-      marginBottom: 8
-    }
-  }, "Modèle prêt et en cache."), status === "loading" && /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12,
-      color: THEME.inkMuted,
-      marginBottom: 8
-    }
-  }, progressText || "Chargement…"), status === "error" && /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12,
-      color: THEME.stamp,
-      marginBottom: 8
-    }
-  }, error), /*#__PURE__*/React.createElement(Button, {
-    variant: "teal",
-    onClick: preload,
-    disabled: status === "loading" || status === "ready"
-  }, status === "ready" ? "Modèle prêt" : status === "loading" ? "Téléchargement…" : "Précharger le modèle"));
-}
-function ApiKeyCard() {
-  const [key, setKey] = useState(() => localStorage.getItem("anthropicApiKey") || "");
-  const [saved, setSaved] = useState(false);
-  function save() {
-    if (key.trim()) {
-      localStorage.setItem("anthropicApiKey", key.trim());
-    } else {
-      localStorage.removeItem("anthropicApiKey");
-    }
-    setSaved(true);
-    setTimeout(() => setSaved(false), 1500);
-  }
-  return /*#__PURE__*/React.createElement("div", {
-    style: {
-      background: THEME.bgCard,
-      border: `1px solid ${THEME.border}`,
-      borderRadius: 12,
-      padding: 16,
-      marginBottom: 14
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      alignItems: "center",
-      gap: 10,
-      marginBottom: 8
-    }
-  }, /*#__PURE__*/React.createElement(Sparkles, {
-    size: 18,
-    color: THEME.pink
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 14,
-      fontWeight: 500,
-      color: THEME.ink
-    }
-  }, "Clé API (recommandé — rapide, aucune charge sur le téléphone)")), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12.5,
-      color: THEME.inkMuted,
-      lineHeight: 1.5,
-      marginBottom: 10
-    }
-  }, "Utilisée en priorité pour \"Corriger avec l'IA\" dès qu'elle est renseignée — quasi instantané, et votre téléphone n'a rien à calculer. Reste sur cet appareil, envoyée uniquement à l'API Anthropic. Créez-en une sur", " ", /*#__PURE__*/React.createElement("a", {
-    href: "https://console.anthropic.com/settings/keys",
-    target: "_blank",
-    rel: "noreferrer",
-    style: {
-      color: THEME.teal
-    }
-  }, "console.anthropic.com"), "."), /*#__PURE__*/React.createElement("input", {
-    type: "password",
-    value: key,
-    onChange: e => setKey(e.target.value),
-    placeholder: "sk-ant-...",
-    style: {
-      width: "100%",
-      background: THEME.bgCardAlt,
-      border: `1px solid ${THEME.border}`,
-      borderRadius: 8,
-      color: THEME.ink,
-      fontSize: 13,
-      padding: "10px 12px",
-      outline: "none",
-      fontFamily: "'IBM Plex Mono', monospace",
-      boxSizing: "border-box",
-      marginBottom: 10
-    }
-  }), /*#__PURE__*/React.createElement(Button, {
-    variant: "teal",
-    onClick: save
-  }, saved ? "Enregistrée" : "Enregistrer la clé"));
-}
 function BackupCard({
   onExportBackup,
   onImportBackup
@@ -4144,7 +3803,7 @@ function SettingsView({
       fontSize: 12,
       color: THEME.teal
     }
-  }, "Activées")), /*#__PURE__*/React.createElement(ApiKeyCard, null), /*#__PURE__*/React.createElement(LocalAICard, null), /*#__PURE__*/React.createElement(WasmAICard, null), /*#__PURE__*/React.createElement(BackupCard, {
+  }, "Activées")), /*#__PURE__*/React.createElement(BackupCard, {
     onExportBackup: onExportBackup,
     onImportBackup: onImportBackup
   }), /*#__PURE__*/React.createElement(PackingTemplateCard, {
@@ -8377,35 +8036,20 @@ function ScriptImportSheet({
   const [fixing, setFixing] = useState(false);
   const [fixError, setFixError] = useState("");
   const [fixed, setFixed] = useState(false);
-  const [loadStatus, setLoadStatus] = useState("");
   const [parseError, setParseError] = useState("");
-  const fixCancelledRef = useRef(false);
   async function fixWithAI() {
     if (!script.trim() || fixing) return;
-    fixCancelledRef.current = false;
     setFixing(true);
     setFixError("");
-    setLoadStatus("");
     try {
-      const cleaned = await normalizeScriptWithAI(script, s => setLoadStatus(s));
-      if (fixCancelledRef.current) return;
+      const cleaned = await normalizeScriptWithAI(script);
       setScript(cleaned);
       setFixed(true);
     } catch (e) {
-      if (fixCancelledRef.current) return;
-      setFixError(e && e.code === "CANCELLED" ? "Correction annulée." : e && e.code === "NO_METHOD" ? "Pas d'IA disponible sur cet appareil. Ajoutez une clé API Anthropic dans Réglages pour activer la correction." : "La correction a échoué (" + (e && e.message ? e.message : "erreur inconnue") + "). Réessayez, ou modifiez le texte à la main.");
+      setFixError("La correction a échoué. Réessayez, ou modifiez le texte à la main.");
     } finally {
-      if (!fixCancelledRef.current) {
-        setFixing(false);
-        setLoadStatus("");
-      }
+      setFixing(false);
     }
-  }
-  function cancelFixWithAI() {
-    fixCancelledRef.current = true;
-    setFixing(false);
-    setLoadStatus("");
-    setFixError("Correction annulée.");
   }
   function confirm() {
     const days = parseScript(script, tripStartDate || null);
@@ -8452,24 +8096,16 @@ function ScriptImportSheet({
       if (parseError) setParseError("");
     },
     placeholder: "Collez ici n'importe quel programme, même en vrac…"
-  })), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 8
-    }
-  }, /*#__PURE__*/React.createElement(Button, {
+  })), /*#__PURE__*/React.createElement(Button, {
     variant: "teal",
     onClick: fixWithAI,
     disabled: !script.trim() || fixing,
     style: {
-      flex: 1
+      width: "100%"
     }
   }, /*#__PURE__*/React.createElement(Sparkles, {
     size: 14
-  }), " ", fixing ? loadStatus || "Correction en cours…" : "Corriger avec l'IA"), fixing && /*#__PURE__*/React.createElement(Button, {
-    variant: "ghost",
-    onClick: cancelFixWithAI
-  }, "Annuler")), fixed && !fixError && /*#__PURE__*/React.createElement("div", {
+  }), " ", fixing ? "Correction en cours…" : "Corriger avec l'IA"), fixed && !fixError && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
       color: THEME.teal,
@@ -9662,7 +9298,8 @@ function GlobalStyles() {
     `);
 }
 const rootEl = document.getElementById("root");
-ReactDOM.createRoot(rootEl).render(/*#__PURE__*/React.createElement(TripCompanion, null));
+ReactDOM.createRoot(rootEl).render(React.createElement(TripCompanion));
+
   } catch (err) {
     var box = document.getElementById("boot-error");
     box.style.display = "block";
