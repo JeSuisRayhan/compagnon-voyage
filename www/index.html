@@ -527,6 +527,131 @@ function guessTypeFromBody(body) {
   return "activite";
 }
 
+// ---------- deterministic free-prose reformatting (no AI, never invents content) ----------
+
+function scriptHasDayHeaderLine(text) {
+  return /^\s*(?:(?:jour|day|j)\s*[\s\-.:]*\s*\d+|(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)\b|\d{1,2}[\/\-.]\d{1,2})/im.test(text);
+}
+
+// Shared "Corriger avec l'IA" pipeline, used by both the onboarding wizard and the
+// script-import sheet on an existing trip. Tries deterministic approaches first (never
+// invents anything) and only reaches for the on-device AI as a genuine last resort.
+async function runScriptCorrection(script, {
+  setScript,
+  setFixed,
+  setFixError,
+  setLoadStatus
+}) {
+  // Already parses into a real itinerary as-is (has timed activities)? Nothing to fix —
+  // don't risk mangling good input by running it through the prose splitter.
+  const rawTimedCount = parseScript(script, null).reduce((s, d) => s + d.activities.filter(a => a.time).length, 0);
+  const lineCount = script.split("\n").map(l => l.trim()).filter(Boolean).length;
+  const alreadyHasHeader = scriptHasDayHeaderLine(script);
+  if (rawTimedCount >= Math.min(2, lineCount) || alreadyHasHeader && rawTimedCount >= 1) {
+    setFixed(true);
+    return;
+  }
+
+  // Free-form prose: the deterministic splitter looks for connector words and time
+  // markers. It returns the text UNCHANGED if it can't find anything real — that's
+  // our signal to know whether it actually helped.
+  const heuristic = heuristicReformatScript(script);
+  if (heuristic !== script) {
+    setScript(heuristic);
+    setFixed(true);
+    return;
+  }
+
+  // Deterministic approaches found nothing at all: try AI as a genuine last resort.
+  setLoadStatus("Aucune structure évidente, tentative via l'IA…");
+  try {
+    const cleaned = await normalizeScriptWithAI(script, s => setLoadStatus(s));
+    const aiCount = parseScript(cleaned, null).reduce((s, d) => s + d.activities.filter(a => a.time).length, 0);
+    if (aiCount > 0) {
+      setScript(cleaned);
+      setFixed(true);
+    } else {
+      setFixError("Impossible d'extraire un programme de ce texte. Essayez de décrire chaque étape sur sa propre ligne.");
+    }
+  } catch (aiError) {
+    setFixError("La correction a échoué. Réessayez, ou modifiez le texte à la main.");
+  }
+}
+function heuristicReformatScript(raw) {
+  const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const AP = "['\u2019]"; // tolerate both straight ' and curly ’ apostrophes
+  const PLAIN_CONNECTORS_SIMPLE = ["ensuite", "puis", "après ça", "après cela", "après quoi", "plus tard", "pour finir", "et enfin", "enfin", "et on a", "et on est", "on a ensuite", "avant de", "avant ça"];
+  // "après" alone is a connector ("après le musée, on a...") but must NOT match inside the
+  // compound word "après-midi" (afternoon) — hence the negative lookahead.
+  const plainConnectorRe = new RegExp("\\b(?:" + PLAIN_CONNECTORS_SIMPLE.map(esc).join("|") + "|après(?!-midi))\\b", "gi");
+  // "et le soir", "et à midi" etc: split on "et " but KEEP the time-of-day phrase in the
+  // following segment (lookahead), since that phrase is what lets us infer the time.
+  const timeLedConnectorRe = new RegExp("\\bet\\s+(?=le matin\\b|en matin[ée]e\\b|[aà]\\s+midi\\b|le soir\\b|en soir[ée]e\\b|l" + AP + "apr[eè]s-midi\\b|vers\\s+\\d)", "gi");
+  const TIME_WORDS = [{
+    re: new RegExp("\\bd[ée]but d" + AP + "apr[eè]s-midi\\b", "i"),
+    time: "14:00"
+  }, {
+    re: /\bfin d['\u2019]apr[eè]s-midi\b/i,
+    time: "17:00"
+  }, {
+    re: new RegExp("\\bl" + AP + "apr[eè]s-midi\\b|\\bapr[eè]s-midi\\b", "i"),
+    time: "14:30"
+  }, {
+    re: /\ble matin\b|\ben matin[ée]e\b/i,
+    time: "09:00"
+  }, {
+    re: /\bmidi\b/i,
+    time: "12:00"
+  }, {
+    re: /\ble soir\b|\ben soir[ée]e\b|\bce soir\b/i,
+    time: "19:00"
+  }, {
+    re: /\bla nuit\b/i,
+    time: "22:00"
+  }, {
+    re: /\bfin de journ[ée]e\b/i,
+    time: "18:00"
+  }];
+  const explicitTimeRe = /(?:vers\s+|à\s+|a\s+)?(\d{1,2})[h:](\d{2})?\b/i;
+  const lines = raw.split("\n").map(l => l.trim()).filter(Boolean);
+  const segments = [];
+  lines.forEach(line => {
+    const sentences = line.split(/(?<=[.;])\s+/).filter(Boolean);
+    sentences.forEach(sentence => {
+      sentence.split(timeLedConnectorRe).flatMap(chunk => chunk.split(plainConnectorRe)).map(s => s.trim()).filter(Boolean).forEach(p => segments.push(p));
+    });
+  });
+  const activities = [];
+  segments.forEach(seg => {
+    let time = null;
+    const explicit = seg.match(explicitTimeRe);
+    if (explicit) {
+      time = `${pad2(+explicit[1])}:${explicit[2] || "00"}`;
+    } else {
+      const found = TIME_WORDS.find(tw => tw.re.test(seg));
+      if (found) time = found.time;
+    }
+    let title = seg.replace(explicitTimeRe, "").replace(/^(on a|on est all[ée]e?s?|nous avons|nous sommes all[ée]e?s?|on part(?:s)? pour|on va(?:it)?)\s+/i, "").replace(/\s{2,}/g, " ").replace(/^[-,;:\s]+|[-,;:\s]+$/g, "").trim();
+    if (!title) return;
+    title = title.charAt(0).toUpperCase() + title.slice(1);
+    activities.push({
+      time,
+      title,
+      type: guessTypeFromBody(title)
+    });
+  });
+  if (activities.length === 0 || !activities.some(a => a.time)) return raw;
+  const timed = activities.filter(a => a.time).sort((a, b) => a.time.localeCompare(b.time));
+  const untimed = activities.filter(a => !a.time);
+  const ordered = [...timed, ...untimed];
+  const out = ["Jour 1"];
+  ordered.forEach(a => {
+    const tag = a.type !== "activite" ? ` [${a.type}]` : "";
+    out.push(`${a.time || ""} ${a.title}${tag}`.trim());
+  });
+  return out.join("\n");
+}
+
 // ---------- money & time helpers ----------
 
 function formatMoney(amount, code) {
@@ -1311,7 +1436,7 @@ function makeChecklist(labels) {
 // ---------- script parser ----------
 
 function parseScript(text, tripStartDate) {
-  const lines = text.split("\n").map(l => l.trim());
+  const lines = text.split("\n").map(l => l.trim().replace(/^[-*•·]\s+/, ""));
   const days = [];
   let current = null;
   const dayHeaderRe = /^(jour|day|j)\s*[\s\-.:]*\s*(\d+)(.*)$/i;
@@ -1319,11 +1444,14 @@ function parseScript(text, tripStartDate) {
   const frDateRe = /(\d{1,2})[\/\-.](\d{1,2})(?:[\/\-.](\d{2,4}))?/;
   const activityRe = /^(\d{1,2})[h:](\d{2})?\s*[-:–]?\s*(.+)$/;
   const tagRe = /\[([^\]]+)\]\s*$/;
+  const weekdayRe = /^(lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)\b/i;
+  const bareDateLeadRe = /^\d{1,2}[\/\-.]\d{1,2}(?:[\/\-.]\d{2,4})?\b/;
   for (const raw of lines) {
     if (!raw) continue;
     const dayMatch = raw.match(dayHeaderRe);
-    if (dayMatch) {
-      const rest = dayMatch[3] || "";
+    const looksLikeUntaggedDayHeader = !dayMatch && !activityRe.test(raw) && (weekdayRe.test(raw) || bareDateLeadRe.test(raw));
+    if (dayMatch || looksLikeUntaggedDayHeader) {
+      const rest = dayMatch ? dayMatch[3] || "" : raw;
       let explicitDate = null;
       const isoM = rest.match(isoDateRe);
       if (isoM) {
@@ -1338,7 +1466,7 @@ function parseScript(text, tripStartDate) {
       const label = rest.replace(isoDateRe, "").replace(frDateRe, "").replace(/^[\s\-–:.,]+/, "").trim();
       current = {
         id: uid(),
-        title: label || `Jour ${dayMatch[2]}`,
+        title: label || `Jour ${dayMatch ? dayMatch[2] : days.length + 1}`,
         date: explicitDate,
         activities: [],
         notes: ""
@@ -1530,29 +1658,6 @@ function TicketCode({
       opacity: 0.85
     }
   }, ticketCode(trip));
-}
-function IconBadge({
-  type,
-  size = 34
-}) {
-  const t = TYPES[type] || TYPES.activite;
-  const Icon = t.icon;
-  return /*#__PURE__*/React.createElement("div", {
-    style: {
-      width: size,
-      height: size,
-      borderRadius: 8,
-      background: t.dim,
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      flexShrink: 0
-    }
-  }, /*#__PURE__*/React.createElement(Icon, {
-    size: size * 0.5,
-    color: t.color,
-    strokeWidth: 2
-  }));
 }
 function Button({
   children,
@@ -2062,9 +2167,12 @@ Jour 2 - Tokyo
     setFixError("");
     setLoadStatus("");
     try {
-      const cleaned = await normalizeScriptWithAI(script, s => setLoadStatus(s));
-      setScript(cleaned);
-      setFixed(true);
+      await runScriptCorrection(script, {
+        setScript,
+        setFixed,
+        setFixError,
+        setLoadStatus
+      });
     } catch (e) {
       setFixError("La correction a échoué. Réessayez, ou modifiez le texte à la main.");
     } finally {
@@ -2869,7 +2977,8 @@ function ActivityRow({
   trip,
   onEdit,
   onToggleDone,
-  isLast
+  isLast,
+  isCurrent
 }) {
   const t = TYPES[activity.type] || TYPES.activite;
   const query = activityQuery(activity);
@@ -2877,6 +2986,7 @@ function ActivityRow({
   const homeTime = trip && trip.tzOffsetHours ? shiftTime(activity.time, trip.tzOffsetHours) : null;
   const showConversion = activity.price != null && trip && trip.currency && trip.homeCurrency && trip.currency !== trip.homeCurrency;
   const done = !!activity.done;
+  const dotSize = isCurrent ? 18 : 12;
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -2895,9 +3005,9 @@ function ActivityRow({
     title: done ? "Marquer comme non faite" : "Marquer comme faite",
     className: done ? "checked-pop" : "",
     style: {
-      width: 20,
-      height: 20,
-      marginTop: 2,
+      width: 22,
+      height: 22,
+      marginTop: isCurrent ? -1 : 2,
       padding: 0,
       border: "none",
       background: "none",
@@ -2909,14 +3019,15 @@ function ActivityRow({
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
-      width: 12,
-      height: 12,
+      width: dotSize,
+      height: dotSize,
       borderRadius: "50%",
-      background: done ? THEME.teal : t.color,
-      boxShadow: `0 0 0 4px ${done ? THEME.tealDim : t.dim}`,
+      background: done ? THEME.teal : isCurrent ? THEME.gold : t.color,
+      boxShadow: isCurrent ? `0 0 0 4px ${THEME.goldDim}, 0 0 0 6px ${THEME.gold}66` : `0 0 0 4px ${done ? THEME.tealDim : t.dim}`,
       display: "flex",
       alignItems: "center",
-      justifyContent: "center"
+      justifyContent: "center",
+      transition: "width 0.2s ease, height 0.2s ease"
     }
   }, done && /*#__PURE__*/React.createElement("div", {
     style: {
@@ -2929,8 +3040,9 @@ function ActivityRow({
     style: {
       flex: 1,
       width: 2,
-      background: THEME.border,
-      marginTop: 4
+      background: done ? THEME.teal : THEME.border,
+      marginTop: 4,
+      transition: "background 0.3s ease"
     }
   })), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -3262,6 +3374,7 @@ function DayDetail({
     if (!b.time) return -1;
     return a.time.localeCompare(b.time);
   });
+  const firstUndoneIndex = sorted.findIndex(a => !a.done);
   const [editing, setEditing] = useState(null);
   const [adding, setAdding] = useState(false);
   const [notes, setNotes] = useState(day.notes || "");
@@ -3321,37 +3434,12 @@ function DayDetail({
     dateISO: date
   })), day.activities.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
-      marginLeft: 30,
-      marginTop: 6,
-      maxWidth: 260
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      justifyContent: "space-between",
-      marginBottom: 4
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
       fontSize: 11.5,
-      color: THEME.teal
+      color: THEME.teal,
+      marginLeft: 30,
+      marginTop: 2
     }
-  }, day.activities.filter(a => a.done).length, "/", day.activities.length, " étape", day.activities.length !== 1 ? "s" : "", " faite", day.activities.filter(a => a.done).length !== 1 ? "s" : "")), /*#__PURE__*/React.createElement("div", {
-    style: {
-      height: 6,
-      borderRadius: 4,
-      background: THEME.bgCardAlt,
-      overflow: "hidden"
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      height: "100%",
-      width: `${day.activities.filter(a => a.done).length / day.activities.length * 100}%`,
-      background: THEME.teal,
-      borderRadius: 4,
-      transition: "width 0.3s ease"
-    }
-  }))), dayTotal > 0 && /*#__PURE__*/React.createElement("div", {
+  }, day.activities.filter(a => a.done).length, "/", day.activities.length, " étape", day.activities.length !== 1 ? "s" : "", " faite", day.activities.filter(a => a.done).length !== 1 ? "s" : ""), dayTotal > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
       color: THEME.gold,
@@ -3387,7 +3475,8 @@ function DayDetail({
       ...a,
       done: !a.done
     }),
-    isLast: i === sorted.length - 1
+    isLast: i === sorted.length - 1,
+    isCurrent: i === firstUndoneIndex
   }))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -8036,19 +8125,25 @@ function ScriptImportSheet({
   const [fixing, setFixing] = useState(false);
   const [fixError, setFixError] = useState("");
   const [fixed, setFixed] = useState(false);
+  const [loadStatus, setLoadStatus] = useState("");
   const [parseError, setParseError] = useState("");
   async function fixWithAI() {
     if (!script.trim() || fixing) return;
     setFixing(true);
     setFixError("");
+    setLoadStatus("");
     try {
-      const cleaned = await normalizeScriptWithAI(script);
-      setScript(cleaned);
-      setFixed(true);
+      await runScriptCorrection(script, {
+        setScript,
+        setFixed,
+        setFixError,
+        setLoadStatus
+      });
     } catch (e) {
       setFixError("La correction a échoué. Réessayez, ou modifiez le texte à la main.");
     } finally {
       setFixing(false);
+      setLoadStatus("");
     }
   }
   function confirm() {
@@ -8105,7 +8200,7 @@ function ScriptImportSheet({
     }
   }, /*#__PURE__*/React.createElement(Sparkles, {
     size: 14
-  }), " ", fixing ? "Correction en cours…" : "Corriger avec l'IA"), fixed && !fixError && /*#__PURE__*/React.createElement("div", {
+  }), " ", fixing ? loadStatus || "Correction en cours…" : "Corriger avec l'IA"), fixed && !fixError && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
       color: THEME.teal,
